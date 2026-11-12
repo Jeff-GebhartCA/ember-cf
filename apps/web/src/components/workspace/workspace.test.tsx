@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloseCode, startingInvolvement, type Account, type Bot, type DirectoryUser, type DirectRoom, type Me, type Message, type Room, type RoomId, type RoomSettings, type SharedRoom, type SidebarRoom, type TimelinePage, type WorkspaceServerFrame, type WorkspaceSettings } from "@ember/protocol";
 import type { AgentSettings } from "@ember/protocol/agents";
-import type { AssistantSettings } from "@ember/protocol/assistant";
+import { THINKING_LEVELS, type AssistantSettings } from "@ember/protocol/assistant";
 import { FlashProvider } from "@/components/flash";
 import { AccountContext } from "@/hooks/use-account";
 import { PushContext } from "@/hooks/use-push";
@@ -24,6 +24,8 @@ const rooms: SharedRoom[] = [
   { id: "general", name: "general", kind: "open", icon: null },
   { id: "random", name: "random", kind: "open", icon: null },
 ];
+/** When a message came that marks a room unread. */
+const NOON = "2026-10-15T12:00:00.000Z";
 /** Ada's DM with Grace. */
 const withGrace: DirectRoom = { id: "d1", kind: "direct", members: [{ id: ada.id, name: ada.name }, { id: "u2", name: "Grace" }], activeAt: "2026-10-15T12:00:00.000Z" };
 /**
@@ -1295,7 +1297,7 @@ describe("Activity filter", () => {
       setTimeout(() => {
         this.onopen?.();
         this.onmessage?.({ data: JSON.stringify({ type: "welcome", you: ada }) });
-        this.onmessage?.({ data: JSON.stringify({ type: "room.unread", roomId: "random" }) });
+        this.onmessage?.({ data: JSON.stringify({ type: "room.unread", roomId: "random", at: NOON }) });
       });
     }
   }
@@ -1553,6 +1555,46 @@ describe("Star rooms", () => {
     expect(star().nextElementSibling).toHaveTextContent("Couldn’t save your favorite. Please try again.");
     expect(star()).toHaveAttribute("aria-pressed", "false");
     expect(sidebarRooms()).toEqual(["general", "random"]);
+  });
+});
+
+describe("New line over the messages that came while a room was unread", () => {
+  const grace = { id: "u2", name: "Grace" };
+  const said: Message = { id: "m1", clientMessageId: "m1", roomId: "random", creator: grace, body: "Morning", plainText: "Morning", mentions: [], createdAt: NOON, updatedAt: NOON, editedAt: null, boosts: [] };
+  /** The workspace socket, and rooms' sockets, which welcome Ada into random with Grace's message, and into any other room with none. */
+  class RandomSocket extends WorkspaceSocket {
+    constructor(url: string) {
+      super(url);
+      if (!url.includes("/api/rooms/")) return;
+      setTimeout(() => {
+        this.readyState = QuietSocket.OPEN;
+        this.onopen?.();
+        const messages = url.includes("/api/rooms/random/") ? [said] : [];
+        this.onmessage?.({ data: JSON.stringify({ type: "welcome", you: ada, messages, present: [ada], hasMore: false }) });
+      });
+    }
+  }
+  const newLine = () => screen.queryByRole("separator", { name: "New messages" });
+
+  it("draws New over the first message in a room opened while it's marked unread, but not once it's read and opened again", async () => {
+    vi.stubGlobal("WebSocket", RandomSocket);
+    const list = roomList(rooms);
+    serve({ "GET /api/sidebar": () => Response.json({ ...list, rooms: list.rooms.map((room) => (room.id === "random" ? { ...room, unread: true, unreadSince: NOON } : room)) }) });
+    showWorkspace("/rooms/general");
+    await roomHeading();
+    expect(newLine()).not.toBeInTheDocument();
+
+    act(() => navigate("/rooms/random"));
+    expect(await screen.findByRole("separator", { name: "New messages" })).toBeVisible();
+
+    // Opening it read it, as the server tells the tab.
+    await workspaceSends({ type: "room.read", roomId: "random" });
+    expect(newLine()).toBeVisible();
+    act(() => navigate("/rooms/general"));
+    await waitFor(() => expect(newLine()).not.toBeInTheDocument());
+    act(() => navigate("/rooms/random"));
+    expect(await screen.findByText("Morning")).toBeVisible();
+    expect(newLine()).not.toBeInTheDocument();
   });
 });
 
@@ -2049,6 +2091,7 @@ describe("Agent pages", () => {
     promptTemplate: null,
     format: "chat",
     levels: { thinking: "low", length: "medium" },
+    thinkingLevels: [...THINKING_LEVELS],
     avatar: false,
     changedBy: { id: ada.id, name: ada.name },
     changedAt: "2026-11-09T12:00:00.000Z",
@@ -2114,10 +2157,10 @@ describe("App icon badge", () => {
     await roomHeading();
     await waitFor(() => expect(badges).toEqual(["cleared"]));
 
-    await workspaceSends({ type: "room.unread", roomId: "random" });
-    await workspaceSends({ type: "room.unread", roomId: withGrace.id });
+    await workspaceSends({ type: "room.unread", roomId: "random", at: NOON });
+    await workspaceSends({ type: "room.unread", roomId: withGrace.id, at: NOON });
     // The room shown counts as read.
-    await workspaceSends({ type: "room.unread", roomId: "general" });
+    await workspaceSends({ type: "room.unread", roomId: "general", at: NOON });
     await workspaceSends({ type: "room.read", roomId: "random" });
     await workspaceSends({ type: "room.read", roomId: withGrace.id });
     expect(badges).toEqual(["cleared", 1, 2, 1, "cleared"]);
